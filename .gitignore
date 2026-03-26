@@ -1,10 +1,12 @@
 # Python
 __pycache__/
 *.pyc
+
+# Ambiente
 venv/
 .venv/
 
-# Ambientes e Segredos
+# Segredos
 .env
 
 # Editores
@@ -15,8 +17,9 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Meus Dados (Opcional - remova se quiser subir as planilhas)
-*.xlsx
-*.csv
-
+# Dados
+data/
 temp_inputs/
+
+# container 
+.devcontainer/
