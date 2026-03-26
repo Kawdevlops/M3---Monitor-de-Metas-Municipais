@@ -1,3 +1,4 @@
+HEAD
 # 📊 Meta 49 - Automação de Recapeamento
 
 Aplicação desenvolvida em **Python + Streamlit** para automatizar o processamento e consolidação dos dados da **Meta 49 - Recapeamento**, integrando informações de arquivos **Excel (CONSEMAVI)** e **Word (CONVIAS)**.
@@ -75,3 +76,9 @@ pip install -r requirements.txt
 streamlit run app_ui.py
 
 ## 📂 Estrutura do projeto
+=======
+# M3 Monitor de Metas Municipais
+
+Sistema desenvolvido para automatizar a coleta, tratamento e consolidação de dados de metas municipais, integrando informações de diferentes fontes (Excel e Word) e gerando relatórios padronizados para acompanhamento e tomada de decisão.
+
+
