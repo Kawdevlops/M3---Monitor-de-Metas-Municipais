@@ -136,7 +136,7 @@ div[data-testid="stFileUploaderDropzone"] p { display: none !important; }
 """
 
 # ── App ────────────────────────────────────────────────────────────────────────
-img_b64 = carregar_imagem_base64(r"img\logo.png")
+img_b64 = carregar_imagem_base64("img/logo.png")
 
 st.set_page_config(page_title="Monitor de Metas Institucionais", layout="wide")
 st.markdown(STYLE, unsafe_allow_html=True)
