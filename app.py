@@ -1,544 +1,373 @@
 from pathlib import Path
+from typing import Optional
 import re
 import unicodedata
-from typing import Optional
 
 import openpyxl
 import pandas as pd
 from docx import Document
 from openpyxl.cell.cell import MergedCell
 
-
+# ── Paths ──────────────────────────────────────────────────────────────────────
 base_dir = Path(__file__).resolve().parent
 data_dir = base_dir / "data"
 exit_dir = base_dir / "exit"
 temp_dir = base_dir / "temp_inputs"
-
 exit_dir.mkdir(exist_ok=True)
 temp_dir.mkdir(exist_ok=True)
 
-arquivo_consemavi_padrao = data_dir / "PDM 2025-2028 - Meta 49 - Recapeamento - Janeiro.26.xlsx"
-arquivo_modelo_padrao = data_dir / "Meta49-formatado.xlsx"
-arquivo_word_padrao = data_dir / "Meta 49 - Janeiro-2026 - CONVIAS.docx"
-arquivo_saida_padrao = exit_dir / "meta49_preenchido.xlsx"
+arquivo_modelo_padrao = data_dir / "Acompanhamento_mensal_PDM_-_2026.xlsx"
 
-subpref_map = {
-    "ad": "cidade ademar",
-    "af": "aricanduva/formosa/carrão",
-    "bt": "butantã",
-    "cl": "campo limpo",
-    "cs": "capela do socorro",
-    "ct": "cidade tiradentes",
-    "cv": "casa verde/cachoeirinha",
-    "em": "ermelino matarazzo",
-    "fb": "freguesia do ó/brasilândia",
-    "g": "guaianases",
-    "ip": "ipiranga",
-    "iq": "itaquera",
-    "it": "itaim paulista",
-    "ja": "jabaquara",
-    "jt": "jaçanã/tremembé",
-    "la": "lapa",
-    "mb": "m'boi mirim",
-    "mg": "vila maria/vila guilherme",
-    "mo": "mooca",
-    "mp": "são miguel paulista",
-    "pa": "parelheiros",
-    "pe": "penha",
-    "pi": "pinheiros",
-    "pj": "pirituba/jaraguá",
-    "pr": "perus/anhanguera",
-    "sa": "santo amaro",
-    "sb": "sapopemba",
-    "se": "sé",
-    "sm": "são mateus",
-    "st": "santana/tucuruvi",
-    "vm": "vila mariana",
-    "vp": "vila prudente",
-    "dzu": "departamento de zeladoria urbana",
+# ── Meses ──────────────────────────────────────────────────────────────────────
+# Abreviação do modelo → nome completo
+ABREV_PARA_MES = {
+    "jan": "janeiro", "fev": "fevereiro", "mar": "março",
+    "abr": "abril",   "mai": "maio",      "jun": "junho",
+    "jul": "julho",   "ago": "agosto",    "set": "setembro",
+    "out": "outubro", "nov": "novembro",  "dez": "dezembro",
 }
+MES_PARA_ABREV = {v: k for k, v in ABREV_PARA_MES.items()}
+MESES = list(ABREV_PARA_MES.values())          # lista de nomes completos
+ABREVS = list(ABREV_PARA_MES.keys())           # lista de abreviações
 
-meses_map = {
-    "janeiro": "jan",
-    "fevereiro": "fev",
-    "março": "mar",
-    "abril": "abr",
-    "maio": "mai",
-    "junho": "jun",
-    "julho": "jul",
-    "agosto": "ago",
-    "setembro": "set",
-    "outubro": "out",
-    "novembro": "nov",
-    "dezembro": "dez",
-}
-meses = list(meses_map.keys())
+# Colunas do modelo (índice 0-based): col 3 = Jan … col 14 = Dez, col 15 = Total
+ABREV_PARA_COL = {a: 3 + i for i, a in enumerate(ABREVS)}
+COL_TOTAL = 15
 
-sigla_aliases = {
-    "fb": "fo",
-}
-
-def padronizar_texto(texto) -> str:
-    if pd.isna(texto):
+# ── Normalização ───────────────────────────────────────────────────────────────
+def norm(texto) -> str:
+    """Remove acentos, caixa baixa, espaços extras."""
+    if texto is None or (isinstance(texto, float) and pd.isna(texto)):
         return ""
-    texto = str(texto).strip().lower()
-    texto = unicodedata.normalize("NFKD", texto).encode("ASCII", "ignore").decode("ASCII")
-    texto = re.sub(r"\s+", " ", texto)
-    return texto
+    s = str(texto).strip().lower()
+    s = unicodedata.normalize("NFKD", s).encode("ASCII", "ignore").decode("ASCII")
+    return re.sub(r"\s+", " ", s)
 
 
-def normalizar_sigla(sigla: str) -> str:
-    if pd.isna(sigla):
-        return ""
-    s = str(sigla).strip().lower()
+def norm_sigla(s) -> str:
+    s = norm(s)
     s = re.sub(r"\s+", "", s)
-    return sigla_aliases.get(s, s)
+    # alias histórico fo → fb
+    return "fb" if s == "fo" else s
 
 
-def traduzir_sub(sigla: str) -> str:
-    return subpref_map.get(normalizar_sigla(sigla), sigla)
-
-
-def numero_br_para_float(valor) -> float:
-    if pd.isna(valor):
+def to_float(valor) -> float:
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
         return 0.0
-    # se já é número de verdade, retorna direto
     if isinstance(valor, (int, float)):
         return float(valor)
-    texto = str(valor).strip()
-    if texto in {"", "-", "–", "—", "nan", "None"}:
+    t = str(valor).strip().replace("m²", "").replace("M²", "").replace("m2", "").strip()
+    if t in {"", "-", "–", "—"}:
         return 0.0
-    texto = texto.replace("m²", "").replace("M²", "").replace("m2", "").strip()
-    # caso 1: formato brasileiro -> 3.041,30
-    if "," in texto:
-        texto = texto.replace(".", "").replace(",", ".")
-    # caso 2: formato normal -> 3041.30
-    texto = re.sub(r"[^0-9.\-]", "", texto)
-    if texto in {"", "-", ".", "-."}:
-        return 0.0
+    if "," in t:
+        t = t.replace(".", "").replace(",", ".")
+    t = re.sub(r"[^0-9.\-]", "", t)
     try:
-        return float(texto)
+        return float(t)
     except ValueError:
         return 0.0
 
-def safe_float(valor) -> float:
-    try:
-        return float(valor)
-    except Exception:
-        return 0.0
 
-
-def classificar_indicador(texto: str) -> Optional[str]:
-    t = padronizar_texto(texto)
-    if "convias" in t:
-        return "convias"
-    if "consemavi" in t:
-        return "consemavi"
-    if "total" in t and "requalificado" in t:
-        return "total"
+def abrev_do_texto(texto: str) -> Optional[str]:
+    """
+    Extrai a abreviação do mês de strings como:
+      'Mar/2026*', 'Março', 'março', 'mar', 'MAR'
+    Retorna a abreviação minúscula (ex: 'mar') ou None.
+    """
+    t = norm(texto)
+    # tenta abreviação direta (jan, fev, mar…)
+    for a in ABREVS:
+        if t == a or t.startswith(a + "/") or t.startswith(a + " "):
+            return a
+    # tenta nome completo
+    for nome, a in MES_PARA_ABREV.items():
+        if t == norm(nome):
+            return a
+    # tenta início do nome (marco → março)
+    for nome, a in MES_PARA_ABREV.items():
+        if norm(nome).startswith(t[:3]):
+            return a
     return None
 
 
-def extrair_textos_docx(caminho_word: Path) -> list[str]:
+# ── Leitura do DOCX (CONVIAS) ─────────────────────────────────────────────────
+def ler_word_convias(caminho_word: Path) -> tuple[pd.DataFrame, str]:
+    """
+    Lê o Word do CONVIAS.
+
+    Formato esperado: tabela com cabeçalho contendo colunas
+      Subprefeitura | Sigla | <Mês>/<Ano>[*]
+    As linhas de dados têm: nome_subprefeitura | sigla | valor
+
+    Retorna (DataFrame com colunas [sigla, convias], abrev_mes).
+    """
     doc = Document(caminho_word)
-    textos = []
-    for p in doc.paragraphs:
-        t = p.text.strip()
-        if t:
-            textos.append(t)
-    for tabela in doc.tables:
-        for row in tabela.rows:
-            for cell in row.cells:
-                t = cell.text.strip()
-                if t:
-                    textos.append(t)
-    return textos
 
+    for tbl in doc.tables:
+        if not tbl.rows:
+            continue
+        header = [cell.text.strip() for cell in tbl.rows[0].cells]
 
-def ler_word_convias(caminho_word: Path, mes_ref: str) -> pd.DataFrame:
-    textos = extrair_textos_docx(caminho_word)
-    textos_limpos = [t.strip() for t in textos if str(t).strip()]
-    dados = []
-    i = 0
-    while i < len(textos_limpos):
-        atual = padronizar_texto(textos_limpos[i])
-        if atual == "total":
-            break
-        sigla_valida = re.fullmatch(r"[a-z]{1,3}", atual) is not None
-        if sigla_valida:
-            sigla = normalizar_sigla(atual)
-            if i + 1 < len(textos_limpos):
-                proximo = textos_limpos[i + 1].strip()
-                valor = numero_br_para_float(proximo)
-                dados.append({
-                    "sigla": sigla,
-                    "mês": mes_ref,
-                    "convias": valor
-                })
-                i += 2
-                continue
-        i += 1
-
-    df = pd.DataFrame(dados)
-
-    if df.empty:
-        raise ValueError("nenhum dado do convias foi lido do word. verifique se o docx está no formato esperado.")
-
-    df["sigla"] = df["sigla"].apply(normalizar_sigla)
-    df["convias"] = df["convias"].apply(numero_br_para_float)
-    df = df.groupby(["sigla", "mês"], as_index=False)["convias"].sum()
-
-    return df
-
-
-def montar_df_consemavi(ano_ref: int, caminho_excel: Path) -> pd.DataFrame:
-    df_raw = pd.read_excel(caminho_excel, sheet_name="49", header=None)
-
-    # pega a coluna onde normalmente ficam os títulos
-    col_titulo = df_raw.iloc[:, 2].astype(str).apply(padronizar_texto)
-
-    titulo_ano = f"area recapeada em {ano_ref}"
-
-    # localizar início do bloco do ano
-    linhas_inicio = col_titulo[col_titulo == titulo_ano].index.tolist()
-    if not linhas_inicio:
-        raise ValueError(f"título 'área recapeada em {ano_ref}' não encontrado no excel do consemavi.")
-
-    linha_titulo_idx = linhas_inicio[0]
-
-    # localizar cabeçalho
-    linha_cabecalho_idx = None
-
-    for idx in range(linha_titulo_idx, min(linha_titulo_idx + 5, len(df_raw))):
-        row_values = [padronizar_texto(x) for x in df_raw.iloc[idx].tolist()]
-        tem_sub = any(x == "sub" for x in row_values)
-        tem_janeiro = any(x == "janeiro" for x in row_values)
-
-        if tem_sub and tem_janeiro:
-            linha_cabecalho_idx = idx
-            break
-
-    if linha_cabecalho_idx is None:
-        for idx in range(max(0, linha_titulo_idx - 5), linha_titulo_idx):
-            row_values = [padronizar_texto(x) for x in df_raw.iloc[idx].tolist()]
-            tem_sub = any(x == "sub" for x in row_values)
-            tem_janeiro = any(x == "janeiro" for x in row_values)
-
-            if tem_sub and tem_janeiro:
-                linha_cabecalho_idx = idx
+        # localiza coluna do mês (header com padrão abrev/ano ou nome do mês)
+        col_mes_idx = None
+        abrev_mes = None
+        for idx, h in enumerate(header):
+            a = abrev_do_texto(h)
+            if a:
+                col_mes_idx = idx
+                abrev_mes = a
                 break
 
-    if linha_cabecalho_idx is None:
-        raise ValueError("não foi possível localizar a linha de cabeçalho do consemavi.")
+        if col_mes_idx is None:
+            continue  # esta tabela não tem mês, tenta a próxima
 
-    # localizar fim do bloco do ano
-    linhas_fim = col_titulo[col_titulo.str.contains("total", na=False)].index.tolist()
+        # localiza coluna da sigla
+        col_sigla_idx = None
+        for idx, h in enumerate(header):
+            if norm(h) == "sigla":
+                col_sigla_idx = idx
+                break
 
-    if not linhas_fim:
-        raise ValueError(f"linha de total do ano {ano_ref} não encontrada no excel do consemavi.")
+        if col_sigla_idx is None:
+            continue
 
-    # pega a primeira linha de total depois do título do ano
-    linhas_fim_validas = [i for i in linhas_fim if i > linha_titulo_idx]
+        dados = []
+        for row in tbl.rows[1:]:
+            cells = [cell.text.strip() for cell in row.cells]
+            if len(cells) <= max(col_sigla_idx, col_mes_idx):
+                continue
+            sigla = norm_sigla(cells[col_sigla_idx])
+            valor = to_float(cells[col_mes_idx])
+            if sigla and re.fullmatch(r"[a-z]{1,3}", sigla):
+                dados.append({"sigla": sigla, "convias": valor})
 
-    if not linhas_fim_validas:
-        raise ValueError(f"não foi encontrada uma linha de total após o bloco do ano {ano_ref}.")
+        if dados:
+            df = pd.DataFrame(dados).groupby("sigla", as_index=False)["convias"].sum()
+            return df, abrev_mes
 
-    linha_fim_idx = linhas_fim_validas[0]
-
-    # aplicar cabeçalho e cortar só o bloco certo
-    df_bloco = df_raw.iloc[linha_cabecalho_idx + 1:linha_fim_idx].copy()
-    df_bloco.columns = df_raw.iloc[linha_cabecalho_idx]
-
-    # localizar coluna da sigla/sub
-    col_sigla = None
-    for c in df_bloco.columns:
-        if "sub" in padronizar_texto(c):
-            col_sigla = c
-            break
-
-    if col_sigla is None:
-        raise ValueError("coluna de subprefeitura/sigla não encontrada no consemavi.")
-
-    # localizar colunas de meses
-    colunas_meses = [c for c in df_bloco.columns if padronizar_texto(str(c).strip()) in meses]
-
-    if not colunas_meses:
-        raise ValueError("nenhuma coluna de mês foi encontrada no consemavi.")
-
-    df_bloco = df_bloco[[col_sigla] + colunas_meses].copy()
-    df_bloco = df_bloco.rename(columns={col_sigla: "sigla"})
-
-    # limpar siglas
-    df_bloco["sigla"] = df_bloco["sigla"].astype(str).str.strip()
-    df_bloco = df_bloco[df_bloco["sigla"] != ""]
-    df_bloco["sigla"] = df_bloco["sigla"].apply(normalizar_sigla)
-    df_bloco = df_bloco[df_bloco["sigla"].str.match(r"^[a-z]{1,3}$", na=False)]
-
-    # converter meses
-    for mes in colunas_meses:
-        df_bloco[mes] = df_bloco[mes].apply(numero_br_para_float)
-
-    # agrupar por sigla
-    df_agrupado = df_bloco.groupby("sigla", as_index=False)[colunas_meses].sum()
-
-    # padronizar nomes dos meses
-    rename_map = {col: padronizar_texto(col) for col in colunas_meses}
-    df_agrupado = df_agrupado.rename(columns=rename_map)
-    colunas_meses_norm = [rename_map[col] for col in colunas_meses]
-
-    # formato longo
-    df_longo = df_agrupado.melt(
-        id_vars=["sigla"],
-        value_vars=colunas_meses_norm,
-        var_name="mês",
-        value_name="consemavi"
+    raise ValueError(
+        "Não foi possível identificar a tabela do CONVIAS no Word.\n"
+        "Verifique se o arquivo possui uma tabela com colunas 'Sigla' e '<Mês>/<Ano>'."
     )
 
-    df_longo["consemavi"] = df_longo["consemavi"].apply(numero_br_para_float)
 
-    return df_longo
+# ── Leitura do Excel CONSEMAVI (Recapeamento) ─────────────────────────────────
+def ler_excel_consemavi(caminho_excel: Path, ano_ref: int, abrev_mes: str) -> pd.DataFrame:
+    """
+    Lê o Excel do CONSEMAVI e retorna DataFrame [sigla, consemavi]
+    para o ano e mês solicitados.
+    """
+    df_raw = pd.read_excel(caminho_excel, sheet_name="49", header=None)
+    col2 = df_raw.iloc[:, 2].astype(str).apply(norm)
 
+    titulo_bloco = f"area recapeada em {ano_ref}"
+    inicios = col2[col2 == titulo_bloco].index.tolist()
+    if not inicios:
+        raise ValueError(f"Bloco '{titulo_bloco}' não encontrado no Excel do CONSEMAVI.")
+
+    linha_titulo = inicios[0]
+
+    # cabeçalho: linha com "sub" e pelo menos um mês
+    linha_header = None
+    for idx in range(linha_titulo, min(linha_titulo + 6, len(df_raw))):
+        vals = [norm(x) for x in df_raw.iloc[idx].tolist()]
+        if "sub" in vals and any(norm(m) in vals for m in MESES):
+            linha_header = idx
+            break
+    if linha_header is None:
+        raise ValueError("Cabeçalho do CONSEMAVI não encontrado.")
+
+    # fim do bloco: primeiro "total" após o início
+    fins = [i for i in col2[col2.str.contains("total", na=False)].index if i > linha_titulo]
+    if not fins:
+        raise ValueError("Linha de total do CONSEMAVI não encontrada.")
+    linha_fim = fins[0]
+
+    df_bloco = df_raw.iloc[linha_header + 1:linha_fim].copy()
+    df_bloco.columns = df_raw.iloc[linha_header]
+
+    # encontra coluna da sigla
+    col_sigla = next(
+        (c for c in df_bloco.columns if "sub" in norm(c) and len(norm(c)) <= 4),
+        None
+    )
+    if col_sigla is None:
+        # fallback: primeira coluna com "sub"
+        col_sigla = next((c for c in df_bloco.columns if "sub" in norm(c)), None)
+    if col_sigla is None:
+        raise ValueError("Coluna de sigla não encontrada no CONSEMAVI.")
+
+    # encontra a coluna do mês solicitado (compara normalizado)
+    mes_nome = ABREV_PARA_MES[abrev_mes]          # ex: "março"
+    col_mes = next(
+        (c for c in df_bloco.columns if norm(str(c)) == norm(mes_nome)),
+        None
+    )
+    if col_mes is None:
+        raise ValueError(
+            f"Coluna '{mes_nome}' não encontrada no bloco {ano_ref} do CONSEMAVI.\n"
+            f"Colunas disponíveis: {[str(c) for c in df_bloco.columns]}"
+        )
+
+    df_bloco = df_bloco[[col_sigla, col_mes]].copy()
+    df_bloco.columns = ["sigla", "consemavi"]
+    df_bloco["sigla"] = df_bloco["sigla"].astype(str).str.strip().apply(norm_sigla)
+    df_bloco = df_bloco[df_bloco["sigla"].str.match(r"^[a-z]{1,3}$", na=False)]
+    df_bloco["consemavi"] = df_bloco["consemavi"].apply(to_float)
+
+    return df_bloco.groupby("sigla", as_index=False)["consemavi"].sum()
+
+
+# ── Montar DataFrame final ────────────────────────────────────────────────────
 def montar_df_final(
     caminho_word: Path,
     caminho_consemavi: Path,
     ano_ref: int,
-    mes_ref: str
-) -> pd.DataFrame:
-    df_convias = ler_word_convias(caminho_word, mes_ref)
-    df_consemavi = montar_df_consemavi(ano_ref, caminho_consemavi)
+) -> tuple[pd.DataFrame, str]:
+    """
+    Retorna (df_final, abrev_mes).
+    df_final tem colunas: sigla, convias, consemavi, total_requalificado.
+    O mês é detectado automaticamente a partir do Word.
+    """
+    df_convias, abrev_mes = ler_word_convias(caminho_word)
+    df_consemavi = ler_excel_consemavi(caminho_consemavi, ano_ref, abrev_mes)
 
-    mes_ref_norm = padronizar_texto(mes_ref)
+    df = pd.merge(df_convias, df_consemavi, on="sigla", how="outer")
+    df["convias"] = df["convias"].fillna(0).apply(to_float)
+    df["consemavi"] = df["consemavi"].fillna(0).apply(to_float)
+    df["total_requalificado"] = df["convias"] + df["consemavi"]
 
-    if mes_ref_norm != "todos os meses":
-        df_convias = df_convias[df_convias["mês"] == mes_ref].copy()
-        df_consemavi = df_consemavi[df_consemavi["mês"] == mes_ref_norm].copy()
-
-    df_convias["sigla"] = df_convias["sigla"].apply(normalizar_sigla)
-    df_consemavi["sigla"] = df_consemavi["sigla"].apply(normalizar_sigla)
-
-    df_final = pd.merge(
-        df_convias,
-        df_consemavi,
-        on=["sigla", "mês"],
-        how="outer"
-    )
-
-    df_final["convias"] = df_final["convias"].fillna(0).apply(numero_br_para_float)
-    df_final["consemavi"] = df_final["consemavi"].fillna(0).apply(numero_br_para_float)
-    df_final["total requalificado"] = df_final["convias"] + df_final["consemavi"]
-    df_final["subprefeitura"] = df_final["sigla"].apply(traduzir_sub)
-
-    df_final = df_final.sort_values(["sigla", "mês"]).reset_index(drop=True)
-
-    total_geral = pd.DataFrame({
-        "subprefeitura": ["total geral"],
-        "sigla": ["total"],
-        "mês": ["anual" if mes_ref_norm == "todos os meses" else mes_ref],
-        "convias": [df_final["convias"].sum()],
-        "consemavi": [df_final["consemavi"].sum()],
-        "total requalificado": [df_final["total requalificado"].sum()],
-    })
-
-    return pd.concat([df_final, total_geral], ignore_index=True)
+    return df.sort_values("sigla").reset_index(drop=True), abrev_mes
 
 
-def localizar_aba_meta49(wb):
-    for nome in wb.sheetnames:
-        if "49" in str(nome):
-            return wb[nome]
-    raise ValueError("aba meta 49 não encontrada no arquivo modelo.")
-
-
-def localizar_colunas(ws):
-    mapa_meses = {}
-    col_total = None
-
-    for row in ws.iter_rows(min_row=1, max_row=12):
-        for cell in row:
-            val = padronizar_texto(cell.value)
-
-            for nome_completo, abrev in meses_map.items():
-                if val == padronizar_texto(abrev):
-                    mapa_meses[padronizar_texto(nome_completo)] = cell.column
-
-            if val == "total":
-                col_total = cell.column
-
-    if not mapa_meses:
-        raise ValueError("não foi possível localizar as colunas de meses no modelo.")
-    if col_total is None:
-        raise ValueError("não foi possível localizar a coluna total no modelo.")
-
-    return mapa_meses, col_total
-
-
-def localizar_linhas(ws):
-    mapa = {}
-    sigla_atual = None
-
-    for r in range(1, ws.max_row + 1):
-        v_sigla = ws.cell(r, 2).value
-        v_ind = ws.cell(r, 3).value
-
-        if v_sigla:
-            sigla_atual = normalizar_sigla(v_sigla)
-
-        ind_tipo = classificar_indicador(v_ind)
-
-        if sigla_atual and ind_tipo:
-            mapa[(sigla_atual, ind_tipo)] = r
-
-    return mapa
-
-
-def localizar_linha_total_meses(ws):
-    for r in range(ws.max_row, 1, -1):
-        valores = [padronizar_texto(ws.cell(r, c).value) for c in range(1, min(ws.max_column, 6) + 1)]
-        if any("total meses" in v for v in valores):
-            return r
-
-    for r in range(ws.max_row, 1, -1):
-        valores = [padronizar_texto(ws.cell(r, c).value) for c in range(1, min(ws.max_column, 6) + 1)]
-        if any(v == "total" for v in valores):
-            return r
-
-    return None
-
-
-def celula_e_mesclada(ws, linha, coluna):
-    return isinstance(ws.cell(linha, coluna), MergedCell)
-
-
-def limpar_linha(ws, linha):
-    if linha is None or linha < 1:
-        return
-
-    for c in range(1, ws.max_column + 1):
-        if not celula_e_mesclada(ws, linha, c):
-            ws.cell(linha, c).value = None
-
-
-def escrever_se_possivel(ws, linha, coluna, valor):
-    if linha is None or coluna is None:
-        return
-    if not celula_e_mesclada(ws, linha, coluna):
-        ws.cell(linha, coluna).value = valor
-
-
-def aplicar_formato_brasileiro(ws, linha, coluna):
-    if linha is None or coluna is None:
-        return
-    if not celula_e_mesclada(ws, linha, coluna):
-        ws.cell(linha, coluna).number_format = '#,##0.00'
-
-def preencher_excel_formatado(
-    df_final: pd.DataFrame,
+# ── Escrever no Excel modelo ───────────────────────────────────────────────────
+def preencher_modelo(
+    df: pd.DataFrame,
+    abrev_mes: str,
     caminho_modelo: Path,
-    caminho_saida: Path
+    caminho_saida: Path,
 ) -> Path:
-    # 1. Carrega o arquivo mantendo a formatação original
+    """
+    Preenche o modelo Acompanhamento_mensal_PDM_-_2026.xlsx (aba Meta 49).
+
+    Estrutura do modelo:
+      Linha 2 (idx): cabeçalho  →  Subprefeitura | Sigla | Indicador | Jan … Dez | Total
+      A cada 3 linhas por subprefeitura:
+        - Total requalificado (m2)
+        - SMSUB/CONVIAS
+        - SMSUB/CONSEMAVI
+      Linha 99: TOTAL:
+    """
+    col_idx = ABREV_PARA_COL[abrev_mes]   # coluna (0-based) onde escrever
+
     wb = openpyxl.load_workbook(caminho_modelo)
-    ws = localizar_aba_meta49(wb)
+    ws = wb["Meta 49"]
 
-    # 2. Mapeia onde as colunas (meses) e linhas (siglas/indicadores) estão
-    mapa_meses, col_total = localizar_colunas(ws)
-    mapa_linhas = localizar_linhas(ws)
+    # Mapeia sigla → (linha_total, linha_convias, linha_consemavi)  [1-based]
+    mapa: dict[str, tuple[int, int, int]] = {}
+    rows_ws = list(ws.iter_rows(values_only=True))
 
-    # 3. Preenche os dados do DataFrame no Excel
-    for _, row in df_final.iterrows():
-        sigla = normalizar_sigla(row["sigla"])
-        mes = padronizar_texto(row["mês"])
+    sigla_atual = None
+    linhas_bloco: list[int] = []
 
-        # Ignora a linha de total do DataFrame, pois vamos recalcular no Excel
-        if sigla == "total":
+    for r_idx, row in enumerate(rows_ws):
+        sigla_cel = row[1]  # coluna B = Sigla
+        ind_cel = norm(row[2]) if row[2] else ""
+
+        if sigla_cel and norm(sigla_cel) not in {"sigla", ""}:
+            s = norm_sigla(sigla_cel)
+            if s != sigla_atual:
+                sigla_atual = s
+                linhas_bloco = []
+
+        if sigla_atual:
+            if "total requalificado" in ind_cel:
+                linhas_bloco = [r_idx + 1]  # 1-based
+            elif "convias" in ind_cel and len(linhas_bloco) == 1:
+                linhas_bloco.append(r_idx + 1)
+            elif "consemavi" in ind_cel and len(linhas_bloco) == 2:
+                linhas_bloco.append(r_idx + 1)
+                mapa[sigla_atual] = tuple(linhas_bloco)  # type: ignore
+
+    def escrever(linha_1based: int, col_0based: int, valor):
+        c = col_0based + 1  # openpyxl usa 1-based
+        cell = ws.cell(linha_1based, c)
+        if not isinstance(cell, MergedCell):
+            cell.value = valor
+
+    # Preenche dados por sigla
+    for _, row in df.iterrows():
+        sigla = norm_sigla(row["sigla"])
+        if sigla not in mapa:
             continue
+        l_total, l_conv, l_cons = mapa[sigla]
+        escrever(l_total, col_idx, row["total_requalificado"])
+        escrever(l_conv,  col_idx, row["convias"])
+        escrever(l_cons,  col_idx, row["consemavi"])
 
-        col = mapa_meses.get(mes)
-        if not col:
-            continue
+    # Recalcula totais de linha (soma de todos os meses)
+    for sigla, (l_total, l_conv, l_cons) in mapa.items():
+        for lin in (l_total, l_conv, l_cons):
+            soma = sum(
+                (ws.cell(lin, c + 1).value or 0)
+                for c in ABREV_PARA_COL.values()
+                if not isinstance(ws.cell(lin, c + 1), MergedCell)
+            )
+            escrever(lin, COL_TOTAL, soma if soma else None)
 
-        # Distribui os valores nas linhas correspondentes (Total, Convias, Consemavi)
-        mapeamento_valores = [
-            ("total", "total requalificado"),
-            ("convias", "convias"),
-            ("consemavi", "consemavi"),
-        ]
+    # Recalcula linha TOTAL: (linha 100 = row index 99, 1-based = 100)
+    linha_total_wb = None
+    for r_idx, row in enumerate(rows_ws):
+        if norm(row[0]) == "total:":
+            linha_total_wb = r_idx + 1
+            break
 
-        for tipo, coluna_origem in mapeamento_valores:
-            linha_excel = mapa_linhas.get((sigla, tipo))
-            if linha_excel:
-                escrever_se_possivel(ws, linha_excel, col, row[coluna_origem])
+    if linha_total_wb:
+        for col_0 in list(ABREV_PARA_COL.values()) + [COL_TOTAL]:
+            soma_col = 0
+            for sigla, (l_total, _, _) in mapa.items():
+                v = ws.cell(l_total, col_0 + 1).value
+                soma_col += v if isinstance(v, (int, float)) else 0
+            escrever(linha_total_wb, col_0, soma_col if soma_col else None)
 
-    # 4. Recalcula os totais horizontais (Soma dos meses por linha)
-    for (sigla, tipo), lin in mapa_linhas.items():
-        if sigla == "total":
-            continue
-
-        soma_linha = sum(safe_float(ws.cell(lin, c).value) for c in mapa_meses.values())
-        escrever_se_possivel(ws, lin, col_total, soma_linha)
-
-    # 5. Localiza a linha de rodapé "Total Meses" para somas verticais
-    linha_total_meses = localizar_linha_total_meses(ws)
-
-    if linha_total_meses:
-        # Limpa possíveis textos residuais de 'total' abaixo da linha principal
-        if linha_total_meses + 1 <= ws.max_row:
-            limpar_linha(ws, linha_total_meses + 1)
-
-        escrever_se_possivel(ws, linha_total_meses, 1, "TOTAL MESES:")
-
-        soma_geral_anual = 0
-        for mes_nome, col_idx in mapa_meses.items():
-            total_do_mes = 0
-            # Soma apenas as linhas do tipo "total" de cada subprefeitura
-            for (sigla, tipo), lin in mapa_linhas.items():
-                if sigla != "total" and tipo == "total":
-                    total_do_mes += safe_float(ws.cell(lin, col_idx).value)
-
-            escrever_se_possivel(ws, linha_total_meses, col_idx, total_do_mes)
-            soma_geral_anual += total_do_mes
-
-        # Preenche o total do total (canto inferior direito)
-        escrever_se_possivel(ws, linha_total_meses, col_total, soma_geral_anual)
-
-    # 6. Salva o resultado final
     wb.save(caminho_saida)
     return caminho_saida
 
 
-def gerar_relatorio_final(
-    ano_ref: int = 2025,
-    mes_ref: str = "janeiro",
-    caminho_word: Optional[Path] = None,
-    caminho_consemavi: Optional[Path] = None,
+# ── Entry point ───────────────────────────────────────────────────────────────
+def gerar_relatorio(
+    caminho_word: Path,
+    caminho_consemavi: Path,
+    ano_ref: int,
+    caminho_modelo: Optional[Path] = None,
     caminho_saida: Optional[Path] = None,
-) -> Path:
-    caminho_word = Path(caminho_word) if caminho_word else arquivo_word_padrao
-    caminho_consemavi = Path(caminho_consemavi) if caminho_consemavi else arquivo_consemavi_padrao
-    caminho_modelo = arquivo_modelo_padrao
-    caminho_saida = Path(caminho_saida) if caminho_saida else arquivo_saida_padrao
-
+) -> tuple[Path, str]:
+    """
+    Gera o Excel preenchido.
+    Retorna (caminho_saida, abrev_mes).
+    """
+    caminho_modelo = caminho_modelo or arquivo_modelo_padrao
     if not caminho_word.exists():
-        raise FileNotFoundError(f"word do convias não encontrado: {caminho_word}")
+        raise FileNotFoundError(f"Word CONVIAS não encontrado: {caminho_word}")
     if not caminho_consemavi.exists():
-        raise FileNotFoundError(f"excel do consemavi não encontrado: {caminho_consemavi}")
+        raise FileNotFoundError(f"Excel CONSEMAVI não encontrado: {caminho_consemavi}")
     if not caminho_modelo.exists():
-        raise FileNotFoundError(f"arquivo modelo não encontrado: {caminho_modelo}")
+        raise FileNotFoundError(f"Modelo não encontrado: {caminho_modelo}")
 
-    df_final = montar_df_final(
-        caminho_word=caminho_word,
-        caminho_consemavi=caminho_consemavi,
-        ano_ref=ano_ref,
-        mes_ref=mes_ref,
-    )
+    df, abrev_mes = montar_df_final(caminho_word, caminho_consemavi, ano_ref)
 
-    return preencher_excel_formatado(
-        df_final=df_final,
-        caminho_modelo=caminho_modelo,
-        caminho_saida=caminho_saida,
-    )
+    if caminho_saida is None:
+        caminho_saida = exit_dir / f"meta49_{ano_ref}_{abrev_mes}.xlsx"
+
+    preencher_modelo(df, abrev_mes, caminho_modelo, caminho_saida)
+    return caminho_saida, abrev_mes
 
 
 if __name__ == "__main__":
-    saida = gerar_relatorio_final(ano_ref=2025, mes_ref="janeiro")
-    print(f"gerado em: {saida}")
+    # Teste rápido — ajuste os caminhos conforme necessário
+    saida, mes = gerar_relatorio(
+        caminho_word=data_dir / "Meta 49 - Março-2026 - CONVIAS.docx",
+        caminho_consemavi=data_dir / "PDM_2025-2028_-_Meta_49_-_Recapeamento_-_Março_26.xlsx",
+        ano_ref=2026,
+    )
+    print(f"Gerado em: {saida}  (mês: {mes})")
