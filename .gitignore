@@ -18,8 +18,10 @@ venv/
 Thumbs.db
 
 # Dados
-data/
+
 temp_inputs/
 
 # container 
 .devcontainer/
+
+exit/Meta49_preenchido.xlsx
