@@ -160,10 +160,17 @@ with st.sidebar:
 
     ano_sel = st.selectbox("Selecione o ano", options=[2026, 2025], index=0)
 
+    mes_manual = st.selectbox(
+        "Selecione o mês",
+        options=ABREVS,
+        format_func=lambda abrev: ABREV_PARA_MES[abrev].capitalize(),
+        index=2
+    )
+
     st.divider()
     st.markdown("**Arquivos de entrada**")
 
-    word_file  = st.file_uploader("Word CONVIAS (.docx)", type=["docx"])
+    word_file = st.file_uploader("Word CONVIAS (.docx)", type=["docx"])
     excel_cons = st.file_uploader("Excel CONSEMAVI — Recapeamento (.xlsx)", type=["xlsx"])
 
     st.divider()
@@ -172,12 +179,20 @@ with st.sidebar:
 # ── Geração ────────────────────────────────────────────────────────────────────
 if btn_gerar:
     erros = []
-    if not word_file:
-        erros.append("Word CONVIAS não enviado.")
-    if not excel_cons:
-        erros.append("Excel CONSEMAVI não enviado.")
+
+    # limpa resultado anterior para não confundir
+    st.session_state.pop("arquivo_gerado", None)
+    st.session_state.pop("mes_gerado", None)
+    st.session_state.pop("ano_gerado", None)
+
+    if not word_file and not excel_cons:
+        erros.append("Envie pelo menos um arquivo: Word CONVIAS ou Excel CONSEMAVI.")
+
     if not arquivo_modelo_padrao.exists():
-        erros.append(f"Modelo não encontrado: coloque o arquivo `Acompanhamento_mensal_PDM_-_2026.xlsx` dentro da pasta `data/`.")
+        erros.append(
+            "Modelo não encontrado: coloque o arquivo "
+            "`Acompanhamento_mensal_PDM_-_2026.xlsx` dentro da pasta `data/`."
+        )
 
     if erros:
         for e in erros:
@@ -185,24 +200,31 @@ if btn_gerar:
     else:
         with st.spinner("Lendo arquivos e preenchendo o modelo..."):
             try:
-                caminho_word  = salvar_upload(word_file,  temp_dir)
-                caminho_cons  = salvar_upload(excel_cons, temp_dir)
+                caminho_word = salvar_upload(word_file, temp_dir) if word_file else None
+                caminho_cons = salvar_upload(excel_cons, temp_dir) if excel_cons else None
+
+                st.info(f"Word recebido: {caminho_word.name if caminho_word else 'não enviado'}")
+                st.info(f"Excel recebido: {caminho_cons.name if caminho_cons else 'não enviado'}")
+                st.info(f"Mês selecionado no painel: {ABREV_PARA_MES[mes_manual].capitalize()}")
 
                 caminho_saida, abrev_mes = gerar_relatorio(
                     caminho_word=caminho_word,
                     caminho_consemavi=caminho_cons,
                     ano_ref=ano_sel,
+                    abrev_mes_manual=mes_manual,
                 )
 
                 mes_nome = ABREV_PARA_MES[abrev_mes].capitalize()
-                st.success(f"Relatório gerado! Mês detectado: **{mes_nome}/{ano_sel}**")
+
+                st.success(f"Relatório gerado! Mês usado: **{mes_nome}/{ano_sel}**")
 
                 st.session_state["arquivo_gerado"] = str(caminho_saida)
-                st.session_state["mes_gerado"]     = mes_nome
-                st.session_state["ano_gerado"]     = ano_sel
+                st.session_state["mes_gerado"] = mes_nome
+                st.session_state["ano_gerado"] = ano_sel
 
             except Exception as exc:
                 st.error(f"Erro ao gerar relatório: {exc}")
+                st.exception(exc)
 
 # ── Botão de download + preview ───────────────────────────────────────────────
 if "arquivo_gerado" in st.session_state:

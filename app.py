@@ -220,21 +220,66 @@ def ler_excel_consemavi(caminho_excel: Path, ano_ref: int, abrev_mes: str) -> pd
 
 # ── Montar DataFrame final ────────────────────────────────────────────────────
 def montar_df_final(
-    caminho_word: Path,
-    caminho_consemavi: Path,
+    caminho_word: Optional[Path],
+    caminho_consemavi: Optional[Path],
     ano_ref: int,
+    abrev_mes_manual: Optional[str] = None,
 ) -> tuple[pd.DataFrame, str]:
     """
     Retorna (df_final, abrev_mes).
-    df_final tem colunas: sigla, convias, consemavi, total_requalificado.
-    O mês é detectado automaticamente a partir do Word.
-    """
-    df_convias, abrev_mes = ler_word_convias(caminho_word)
-    df_consemavi = ler_excel_consemavi(caminho_consemavi, ano_ref, abrev_mes)
 
+    Funciona em três situações:
+      1. Apenas Word CONVIAS
+      2. Apenas Excel CONSEMAVI
+      3. Word + Excel juntos
+
+    Regra do mês:
+      - Se tiver Word, o mês é descoberto pelo Word.
+      - Se tiver só Excel, o mês vem do painel do Streamlit.
+    """
+    if caminho_word is None and caminho_consemavi is None:
+        raise ValueError("Envie pelo menos um arquivo: Word CONVIAS ou Excel CONSEMAVI.")
+
+    # Cria tabelas vazias para evitar erro quando um dos arquivos não for enviado
+    df_convias = pd.DataFrame(columns=["sigla", "convias"])
+    df_consemavi = pd.DataFrame(columns=["sigla", "consemavi"])
+
+    abrev_mes = None
+
+    # Se tiver Word, lê CONVIAS e descobre o mês pelo próprio Word
+    if caminho_word is not None:
+        df_convias, abrev_mes = ler_word_convias(caminho_word)
+
+    # Se tiver Excel, lê CONSEMAVI
+    if caminho_consemavi is not None:
+
+        # Se não veio Word, então ainda não sabemos o mês.
+        # Nesse caso, usamos o mês escolhido no painel do Streamlit.
+        if abrev_mes is None:
+            abrev_mes = abrev_mes_manual
+
+        # Se mesmo assim não tiver mês, o sistema não sabe qual coluna do Excel pegar.
+        if abrev_mes is None:
+            raise ValueError(
+                "Não foi possível identificar o mês. "
+                "Quando enviar apenas o Excel CONSEMAVI, selecione o mês no painel."
+            )
+
+        df_consemavi = ler_excel_consemavi(
+            caminho_excel=caminho_consemavi,
+            ano_ref=ano_ref,
+            abrev_mes=abrev_mes,
+        )
+
+    # Junta os dados.
+    # Se tiver só Word, vem CONVIAS e CONSEMAVI fica zero.
+    # Se tiver só Excel, vem CONSEMAVI e CONVIAS fica zero.
+    # Se tiver os dois, junta os dois pela sigla.
     df = pd.merge(df_convias, df_consemavi, on="sigla", how="outer")
+
     df["convias"] = df["convias"].fillna(0).apply(to_float)
     df["consemavi"] = df["consemavi"].fillna(0).apply(to_float)
+
     df["total_requalificado"] = df["convias"] + df["consemavi"]
 
     return df.sort_values("sigla").reset_index(drop=True), abrev_mes
@@ -335,39 +380,49 @@ def preencher_modelo(
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+
 def gerar_relatorio(
-    caminho_word: Path,
-    caminho_consemavi: Path,
-    ano_ref: int,
+    caminho_word: Optional[Path] = None,
+    caminho_consemavi: Optional[Path] = None,
+    ano_ref: int = 2026,
     caminho_modelo: Optional[Path] = None,
     caminho_saida: Optional[Path] = None,
+    abrev_mes_manual: Optional[str] = None,
 ) -> tuple[Path, str]:
     """
     Gera o Excel preenchido.
+
+    Aceita:
+      - somente Word CONVIAS;
+      - somente Excel CONSEMAVI;
+      - Word + Excel juntos.
+
     Retorna (caminho_saida, abrev_mes).
     """
     caminho_modelo = caminho_modelo or arquivo_modelo_padrao
-    if not caminho_word.exists():
+
+    if caminho_word is None and caminho_consemavi is None:
+        raise FileNotFoundError("Envie pelo menos um arquivo: Word CONVIAS ou Excel CONSEMAVI.")
+
+    if caminho_word is not None and not caminho_word.exists():
         raise FileNotFoundError(f"Word CONVIAS não encontrado: {caminho_word}")
-    if not caminho_consemavi.exists():
+
+    if caminho_consemavi is not None and not caminho_consemavi.exists():
         raise FileNotFoundError(f"Excel CONSEMAVI não encontrado: {caminho_consemavi}")
+
     if not caminho_modelo.exists():
         raise FileNotFoundError(f"Modelo não encontrado: {caminho_modelo}")
 
-    df, abrev_mes = montar_df_final(caminho_word, caminho_consemavi, ano_ref)
+    df, abrev_mes = montar_df_final(
+        caminho_word=caminho_word,
+        caminho_consemavi=caminho_consemavi,
+        ano_ref=ano_ref,
+        abrev_mes_manual=abrev_mes_manual,
+    )
 
     if caminho_saida is None:
         caminho_saida = exit_dir / f"meta49_{ano_ref}_{abrev_mes}.xlsx"
 
     preencher_modelo(df, abrev_mes, caminho_modelo, caminho_saida)
+
     return caminho_saida, abrev_mes
-
-
-if __name__ == "__main__":
-    # Teste rápido — ajuste os caminhos conforme necessário
-    saida, mes = gerar_relatorio(
-        caminho_word=data_dir / "Meta 49 - Março-2026 - CONVIAS.docx",
-        caminho_consemavi=data_dir / "PDM_2025-2028_-_Meta_49_-_Recapeamento_-_Março_26.xlsx",
-        ano_ref=2026,
-    )
-    print(f"Gerado em: {saida}  (mês: {mes})")
